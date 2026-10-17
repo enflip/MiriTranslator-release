@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MiriTranslator
 // @namespace    https://github.com/enflip/MiriTranslator
-// @version      0.5.0
+// @version      0.5.1
 // @author       MiriTranslator contributors
 // @description  가벼운 브라우저 만화 번역기 — 로컬 지우기·조판 + 무료 API, 서버 불필요. Lightweight in-browser manga translator.
 // @license      MIT
@@ -307,9 +307,10 @@
 			const a = abs(orig);
 			if (a) return a;
 		}
+		if (img.dataset.miriState) return "";
 		const lazy = lazyUrl(img);
 		const cur = img.currentSrc || img.src || "";
-		const usable = /^(blob|data):/i.test(cur) ? "" : cur;
+		const usable = /^data:/i.test(cur) ? "" : cur;
 		const absCur = usable ? abs(usable) : "";
 		if (lazy && (img.naturalWidth <= 2 || !absCur || isPlaceholder(cur))) return lazy;
 		return absCur || deferredUrl(img);
@@ -319,9 +320,8 @@
 		if (img.closest("header,footer,nav,aside")) return false;
 		const url = imgUrl(img);
 		if (!url || /^data:/i.test(url)) return false;
-		const w = img.naturalWidth || img.getBoundingClientRect().width;
-		const h = img.naturalHeight || img.getBoundingClientRect().height;
-		if (w > 2 && h > 2) return shaped(w, h);
+		const r = img.getBoundingClientRect();
+		if (r.width > 2 && r.height > 2) return shaped(r.width, r.height);
 		return !!img.dataset.miriOrig || deferredUrl(img) !== "";
 	}
 	function collect() {
@@ -378,23 +378,29 @@
 				return added;
 			};
 			scan();
-			const nearest = () => {
-				const mid = window.innerHeight / 2;
+			const currentPage = () => {
+				const vw = window.innerWidth;
+				const vh = window.innerHeight;
 				let best = 0;
+				let bestArea = -1;
 				let bestD = Infinity;
 				for (const [idx, img] of indexToEl) {
 					if (!img.isConnected) continue;
 					const r = img.getBoundingClientRect();
-					if (!r.height) continue;
-					const d = Math.abs(r.top + r.height / 2 - mid);
-					if (d < bestD) {
+					if (r.width <= 0 || r.height <= 0) continue;
+					const w = Math.min(r.right, vw) - Math.max(r.left, 0);
+					const h = Math.min(r.bottom, vh) - Math.max(r.top, 0);
+					const area = w > 0 && h > 0 ? w * h : 0;
+					const d = Math.hypot(r.left + r.width / 2 - vw / 2, r.top + r.height / 2 - vh / 2);
+					if (area > bestArea || area === bestArea && d < bestD) {
+						bestArea = area;
 						bestD = d;
 						best = idx;
 					}
 				}
 				return best || last || 1;
 			};
-			last = nearest();
+			last = currentPage();
 			const navCbs = new Set();
 			const notify = (index) => {
 				if (index === last) return;
@@ -406,16 +412,17 @@
 				if (raf) return;
 				raf = requestAnimationFrame(() => {
 					raf = 0;
-					notify(nearest());
+					notify(currentPage());
 				});
 			};
 			window.addEventListener("scroll", onViewport, { passive: true });
 			window.addEventListener("resize", onViewport, { passive: true });
+			setInterval(() => notify(currentPage()), 350);
 			const imgCbs = new Set();
 			let timer;
 			const refresh = () => {
 				scan();
-				notify(nearest());
+				notify(currentPage());
 				imgCbs.forEach((cb) => cb());
 			};
 			new MutationObserver(() => {
@@ -3700,6 +3707,11 @@ button.b.primary { background: #1f2937; color: #fff; border-color: #1f2937; }
 			}
 		};
 		const fetchBytes = async (page, signal, el) => {
+			if (page.url.startsWith("blob:")) {
+				const px = await bytesFromElement(el);
+				if (px) return px;
+				throw new Error("blob 이미지를 읽을 수 없음 (아직 로드되지 않음)");
+			}
 			try {
 				const r = await gmRequest({
 					url: page.url,
