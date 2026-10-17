@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MiriTranslator
 // @namespace    https://github.com/enflip/MiriTranslator
-// @version      0.3.3
+// @version      0.4.0
 // @author       MiriTranslator contributors
 // @description  가벼운 브라우저 만화 번역기 — 로컬 지우기·조판 + 무료 API, 서버 불필요. Lightweight in-browser manga translator.
 // @license      MIT
@@ -9,7 +9,7 @@
 // @supportURL   https://github.com/enflip/MiriTranslator-release/issues
 // @downloadURL  https://raw.githubusercontent.com/enflip/MiriTranslator-release/main/MiriTranslator.user.js
 // @updateURL    https://raw.githubusercontent.com/enflip/MiriTranslator-release/main/MiriTranslator.meta.js
-// @match        https://k-hentai.org/r/*
+// @match        *://*/*
 // @connect      k-hentai.org
 // @connect      siam-cdn.net
 // @connect      lensfrontend-pa.googleapis.com
