@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MiriTranslator
 // @namespace    https://github.com/enflip/MiriTranslator
-// @version      0.4.0
+// @version      0.5.0
 // @author       MiriTranslator contributors
 // @description  가벼운 브라우저 만화 번역기 — 로컬 지우기·조판 + 무료 API, 서버 불필요. Lightweight in-browser manga translator.
 // @license      MIT
@@ -185,31 +185,144 @@
 			};
 		}
 	};
-	var MIN_SIDE = 250;
+	var g = globalThis;
+	typeof g.GM_xmlhttpRequest === "function" || typeof g.GM !== "undefined" && g.GM?.xmlHttpRequest, typeof g.GM_getValue === "function" || typeof g.GM !== "undefined" && g.GM?.getValue, g.GM_registerMenuCommand;
+	var transport = null;
+	function gmRequest(req) {
+		if (transport) return transport(req);
+		const xhr = g.GM_xmlhttpRequest ?? g.GM?.xmlHttpRequest;
+		if (typeof xhr === "function") return new Promise((resolve, reject) => {
+			let body = req.body;
+			if (body instanceof Uint8Array) body = new Blob([body]);
+			if (body instanceof ArrayBuffer) body = new Blob([body]);
+			const handle = xhr({
+				url: req.url,
+				method: req.method ?? "GET",
+				headers: req.headers,
+				data: body,
+				responseType: "arraybuffer",
+				timeout: req.timeoutMs ?? 6e4,
+				anonymous: req.anonymous ?? true,
+				onload: (r) => resolve({
+					status: r.status,
+					statusText: r.statusText,
+					headers: r.responseHeaders ?? "",
+					body: r.response,
+					finalUrl: r.finalUrl ?? req.url
+				}),
+				onerror: (e) => reject(new Error(`network error: ${e?.error ?? e?.statusText ?? "unknown"}`)),
+				ontimeout: () => reject(new Error("timeout")),
+				onabort: () => reject(new DOMException("aborted", "AbortError"))
+			});
+			req.signal?.addEventListener("abort", () => handle?.abort?.());
+		});
+		return fetch(req.url, {
+			method: req.method ?? "GET",
+			headers: req.headers,
+			body: req.body,
+			credentials: req.anonymous === false ? "include" : "omit",
+			signal: req.signal
+		}).then(async (r) => ({
+			status: r.status,
+			statusText: r.statusText,
+			headers: [...r.headers.entries()].map(([k, v]) => `${k}: ${v}`).join("\n"),
+			body: await r.arrayBuffer(),
+			finalUrl: r.url
+		}));
+	}
+	async function gmGet(key, def) {
+		if (typeof g.GM_getValue === "function") return g.GM_getValue(key, def);
+		if (g.GM?.getValue) return await g.GM.getValue(key, def);
+		try {
+			const v = g.localStorage?.getItem(key);
+			return v === null || v === void 0 ? def : JSON.parse(v);
+		} catch {
+			return def;
+		}
+	}
+	async function gmSet(key, value) {
+		if (typeof g.GM_setValue === "function") return g.GM_setValue(key, value);
+		if (g.GM?.setValue) return g.GM.setValue(key, value);
+		try {
+			g.localStorage?.setItem(key, JSON.stringify(value));
+		} catch {}
+	}
+	function gmMenu(label, fn) {
+		if (typeof g.GM_registerMenuCommand === "function") g.GM_registerMenuCommand(label, fn);
+	}
+	function scriptVersion() {
+		try {
+			return g.GM_info?.script?.version ?? "dev";
+		} catch {
+			return "dev";
+		}
+	}
+	var MIN_SIDE = 200;
 	var MAX_RATIO = 2.5;
-	var isPlaceholder = (u) => !u || u.startsWith("data:") || /transparen|blank|placeholder|spacer|loading|1x1|px\.(gif|png)/i.test(u);
+	var SITES_KEY = "miri.sites.v1";
+	async function isSiteEnabled(host) {
+		const list = await gmGet(SITES_KEY, []);
+		return Array.isArray(list) && list.includes(host);
+	}
+	async function setSiteEnabled(host, on) {
+		const list = await gmGet(SITES_KEY, []);
+		const cur = Array.isArray(list) ? list : [];
+		await gmSet(SITES_KEY, on ? Array.from(new Set([...cur, host])) : cur.filter((h) => h !== host));
+	}
+	function abs(v) {
+		if (!v) return "";
+		try {
+			return new URL(v, location.href).href;
+		} catch {
+			return "";
+		}
+	}
+	var IMG_EXT = /\.(jpe?g|png|webp|gif|avif|bmp|jxl)(\?|#|$)/i;
+	var isPlaceholder = (u) => !u || /^data:/i.test(u) || /transparen|blank|placeholder|spacer|loading|1x1|px\.(gif|png)/i.test(u);
 	function lazyUrl(img) {
-		const vals = Object.values(img.dataset).filter((v) => typeof v === "string");
-		return vals.find((v) => /^(https?:)?\/\//.test(v) && /\.(jpe?g|png|webp|gif|avif|bmp)/i.test(v)) || vals.find((v) => /^(https?:)?\/\/\S{8,}/.test(v)) || "";
+		const vals = Object.values(img.dataset).filter((v) => typeof v === "string" && v.length > 0);
+		const ext = vals.find((v) => IMG_EXT.test(v));
+		const any = vals.find((v) => /^(https?:)?\/\/|^\/|^\.\.?\//.test(v) && !/^data:/i.test(v));
+		const pick = ext || any;
+		return pick ? abs(pick) : "";
+	}
+	function srcsetUrl(v) {
+		return abs(v.split(",")[0]?.trim().split(/\s+/)[0] ?? "");
+	}
+	function pictureUrl(img) {
+		const pic = img.parentElement;
+		if (!pic || pic.tagName !== "PICTURE") return "";
+		for (const s of Array.from(pic.querySelectorAll("source"))) {
+			const u = srcsetUrl(s.getAttribute("srcset") || s.getAttribute("data-srcset") || "");
+			if (u) return u;
+		}
+		return "";
+	}
+	function deferredUrl(img) {
+		return lazyUrl(img) || pictureUrl(img) || (img.srcset ? srcsetUrl(img.srcset) : "");
 	}
 	function imgUrl(img) {
+		const orig = img.dataset.miriOrig;
+		if (orig) {
+			const a = abs(orig);
+			if (a) return a;
+		}
 		const lazy = lazyUrl(img);
 		const cur = img.currentSrc || img.src || "";
-		const usable = cur.startsWith("blob:") ? "" : cur;
-		if (lazy && (img.naturalWidth <= 2 || isPlaceholder(cur) || !usable)) return lazy;
-		return usable || lazy;
+		const usable = /^(blob|data):/i.test(cur) ? "" : cur;
+		const absCur = usable ? abs(usable) : "";
+		if (lazy && (img.naturalWidth <= 2 || !absCur || isPlaceholder(cur))) return lazy;
+		return absCur || deferredUrl(img);
 	}
 	var shaped = (w, h) => w >= MIN_SIDE && h >= MIN_SIDE && w / h < MAX_RATIO;
-	function inChrome(el) {
-		return !!el.closest("header,footer,nav,aside");
-	}
-	function isCandidate(el) {
-		if (el.tagName !== "IMG" || inChrome(el)) return false;
-		const img = el;
-		if (img.naturalWidth > 2 && img.naturalHeight > 2) return shaped(img.naturalWidth, img.naturalHeight);
-		const r = img.getBoundingClientRect();
-		if (shaped(r.width, r.height)) return true;
-		return !!lazyUrl(img);
+	function isCandidate(img) {
+		if (img.closest("header,footer,nav,aside")) return false;
+		const url = imgUrl(img);
+		if (!url || /^data:/i.test(url)) return false;
+		const w = img.naturalWidth || img.getBoundingClientRect().width;
+		const h = img.naturalHeight || img.getBoundingClientRect().height;
+		if (w > 2 && h > 2) return shaped(w, h);
+		return !!img.dataset.miriOrig || deferredUrl(img) !== "";
 	}
 	function collect() {
 		const out = [];
@@ -229,91 +342,99 @@
 	var genericAdapter = {
 		id: "generic",
 		matches: (loc) => /^https?:$/.test(loc.protocol),
+		isEnabled: () => isSiteEnabled(location.hostname),
 		async init() {
-			const indexOf = new WeakMap();
-			const order = [];
+			const urlToIndex = new Map();
 			const pages = [];
+			let indexToEl = new Map();
+			let nextIndex = 1;
+			let last = 1;
 			const scan = () => {
+				const elFor = new Map();
+				let added = false;
 				for (const img of collect()) {
 					if (!isCandidate(img)) continue;
-					let idx = indexOf.get(img);
-					if (idx === void 0) {
-						idx = order.length + 1;
-						indexOf.set(img, idx);
-						order.push(img);
-					}
-					const p = pages[idx - 1] ?? (pages[idx - 1] = {
-						index: idx,
-						url: ""
-					});
 					const url = imgUrl(img);
-					if (/^(https?:)?\/\//.test(url)) p.url = url;
+					if (!url) continue;
+					let idx = urlToIndex.get(url);
+					if (idx === void 0) {
+						idx = nextIndex++;
+						urlToIndex.set(url, idx);
+						pages[idx - 1] = {
+							index: idx,
+							url
+						};
+						added = true;
+					}
+					const p = pages[idx - 1];
+					p.url = url;
 					if (img.naturalWidth > 2) {
 						p.width = img.naturalWidth;
 						p.height = img.naturalHeight;
 					}
+					if (!elFor.has(idx)) elFor.set(idx, img);
 				}
+				indexToEl = elFor;
+				return added;
 			};
 			scan();
-			const portrait = order.filter((img) => {
-				const w = img.naturalWidth || img.getBoundingClientRect().width;
-				const h = img.naturalHeight || img.getBoundingClientRect().height;
-				return w > 0 && h >= w;
-			});
-			const tallStrip = order.length === 1 && portrait.length === 1;
-			if (portrait.length < 2 && !tallStrip) return null;
 			const nearest = () => {
 				const mid = window.innerHeight / 2;
-				let bestIdx = 1;
+				let best = 0;
 				let bestD = Infinity;
-				for (let i = 0; i < order.length; i++) {
-					const img = order[i];
+				for (const [idx, img] of indexToEl) {
 					if (!img.isConnected) continue;
 					const r = img.getBoundingClientRect();
 					if (!r.height) continue;
 					const d = Math.abs(r.top + r.height / 2 - mid);
 					if (d < bestD) {
 						bestD = d;
-						bestIdx = i + 1;
+						best = idx;
 					}
 				}
-				return bestIdx;
+				return best || last || 1;
 			};
+			last = nearest();
 			const navCbs = new Set();
-			let last = nearest();
+			const notify = (index) => {
+				if (index === last) return;
+				last = index;
+				navCbs.forEach((cb) => cb(index));
+			};
 			let raf = 0;
-			const onScroll = () => {
+			const onViewport = () => {
 				if (raf) return;
 				raf = requestAnimationFrame(() => {
 					raf = 0;
-					const now = nearest();
-					if (now !== last) {
-						last = now;
-						navCbs.forEach((cb) => cb(now));
-					}
+					notify(nearest());
 				});
 			};
-			window.addEventListener("scroll", onScroll, { passive: true });
-			window.addEventListener("resize", onScroll, { passive: true });
+			window.addEventListener("scroll", onViewport, { passive: true });
+			window.addEventListener("resize", onViewport, { passive: true });
 			const imgCbs = new Set();
 			let timer;
+			const refresh = () => {
+				scan();
+				notify(nearest());
+				imgCbs.forEach((cb) => cb());
+			};
 			new MutationObserver(() => {
 				clearTimeout(timer);
-				timer = setTimeout(() => {
-					scan();
-					imgCbs.forEach((cb) => cb());
-				}, 300);
+				timer = setTimeout(refresh, 300);
 			}).observe(document.body, {
 				childList: true,
 				subtree: true,
 				attributes: true,
-				attributeFilter: ["src", "srcset"]
+				attributeFilter: [
+					"src",
+					"srcset",
+					"data-src"
+				]
 			});
 			return {
 				chapterId: `generic:${location.host}${location.pathname}`,
 				pages,
 				sourceLang: null,
-				autoStart: false,
 				referer: location.href,
 				currentIndex: () => last,
 				onNavigate(cb) {
@@ -321,10 +442,8 @@
 					return () => navCbs.delete(cb);
 				},
 				imageElements() {
-					const map = new Map();
 					scan();
-					for (let i = 0; i < order.length; i++) if (order[i].isConnected) map.set(i + 1, order[i]);
-					return map;
+					return new Map(indexToEl);
 				},
 				onImagesChanged(cb) {
 					imgCbs.add(cb);
@@ -468,78 +587,6 @@
 			h = Math.imul(h, 16777619) >>> 0;
 		}
 		return `fnv${h.toString(16)}-${bytes.length}`;
-	}
-	var g = globalThis;
-	typeof g.GM_xmlhttpRequest === "function" || typeof g.GM !== "undefined" && g.GM?.xmlHttpRequest, typeof g.GM_getValue === "function" || typeof g.GM !== "undefined" && g.GM?.getValue, g.GM_registerMenuCommand;
-	var transport = null;
-	function gmRequest(req) {
-		if (transport) return transport(req);
-		const xhr = g.GM_xmlhttpRequest ?? g.GM?.xmlHttpRequest;
-		if (typeof xhr === "function") return new Promise((resolve, reject) => {
-			let body = req.body;
-			if (body instanceof Uint8Array) body = new Blob([body]);
-			if (body instanceof ArrayBuffer) body = new Blob([body]);
-			const handle = xhr({
-				url: req.url,
-				method: req.method ?? "GET",
-				headers: req.headers,
-				data: body,
-				responseType: "arraybuffer",
-				timeout: req.timeoutMs ?? 6e4,
-				anonymous: req.anonymous ?? true,
-				onload: (r) => resolve({
-					status: r.status,
-					statusText: r.statusText,
-					headers: r.responseHeaders ?? "",
-					body: r.response,
-					finalUrl: r.finalUrl ?? req.url
-				}),
-				onerror: (e) => reject(new Error(`network error: ${e?.error ?? e?.statusText ?? "unknown"}`)),
-				ontimeout: () => reject(new Error("timeout")),
-				onabort: () => reject(new DOMException("aborted", "AbortError"))
-			});
-			req.signal?.addEventListener("abort", () => handle?.abort?.());
-		});
-		return fetch(req.url, {
-			method: req.method ?? "GET",
-			headers: req.headers,
-			body: req.body,
-			credentials: req.anonymous === false ? "include" : "omit",
-			signal: req.signal
-		}).then(async (r) => ({
-			status: r.status,
-			statusText: r.statusText,
-			headers: [...r.headers.entries()].map(([k, v]) => `${k}: ${v}`).join("\n"),
-			body: await r.arrayBuffer(),
-			finalUrl: r.url
-		}));
-	}
-	async function gmGet(key, def) {
-		if (typeof g.GM_getValue === "function") return g.GM_getValue(key, def);
-		if (g.GM?.getValue) return await g.GM.getValue(key, def);
-		try {
-			const v = g.localStorage?.getItem(key);
-			return v === null || v === void 0 ? def : JSON.parse(v);
-		} catch {
-			return def;
-		}
-	}
-	async function gmSet(key, value) {
-		if (typeof g.GM_setValue === "function") return g.GM_setValue(key, value);
-		if (g.GM?.setValue) return g.GM.setValue(key, value);
-		try {
-			g.localStorage?.setItem(key, JSON.stringify(value));
-		} catch {}
-	}
-	function gmMenu(label, fn) {
-		if (typeof g.GM_registerMenuCommand === "function") g.GM_registerMenuCommand(label, fn);
-	}
-	function scriptVersion() {
-		try {
-			return g.GM_info?.script?.version ?? "dev";
-		} catch {
-			return "dev";
-		}
 	}
 	var clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 	var luma$1 = (r, g, b) => .299 * r + .587 * g + .114 * b;
@@ -3574,11 +3621,21 @@ button.b.primary { background: #1f2937; color: #fff; border-color: #1f2937; }
 	async function main() {
 		const adapter = ADAPTERS.find((a) => a.matches(location));
 		if (!adapter) return;
+		const host = location.hostname;
+		if (adapter.isEnabled && !await adapter.isEnabled(location)) {
+			gmMenu(`MiriTranslator: 이 사이트(${host}) 번역 켜기`, () => {
+				setSiteEnabled(host, true).then(() => location.reload());
+			});
+			return;
+		}
 		const session = await adapter.init();
 		if (!session) {
 			console.warn("[miri] adapter could not read the page");
 			return;
 		}
+		if (adapter.isEnabled) gmMenu("MiriTranslator: 이 사이트 번역 끄기", () => {
+			setSiteEnabled(host, false).then(() => location.reload());
+		});
 		let settings = await loadSettings();
 		const log = (...a) => settings.debug && console.log("[miri]", ...a);
 		const plat = platform();
@@ -3773,6 +3830,7 @@ button.b.primary { background: #1f2937; color: #fff; border-color: #1f2937; }
 		};
 		session.onImagesChanged(() => {
 			scheduler.setPages(session.pages);
+			scheduler.pump();
 			applyAll();
 		});
 		let pressTimer;
@@ -3885,7 +3943,7 @@ button.b.primary { background: #1f2937; color: #fff; border-color: #1f2937; }
 			const d = describe();
 			status(scheduler.snapshot().running ? "working" : "idle", d.text, d.detail);
 		});
-		if (settings.enabled && session.autoStart === false) status("idle", `대기 중 — 「지금 번역」을 누르면 ${session.pages.length}페이지를 번역합니다`);
+		if (settings.enabled && session.pages.length === 0) status("idle", "이미지를 찾는 중 — 페이지 이미지가 나타나면 번역을 시작합니다");
 		else {
 			status(settings.enabled ? "working" : "off", `시작: ${session.pages.length}페이지, 원문 ${ctx.sourceLang}`);
 			scheduler.pump();
