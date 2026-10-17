@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MiriTranslator
 // @namespace    https://github.com/enflip/MiriTranslator
-// @version      0.5.1
+// @version      0.5.2
 // @author       MiriTranslator contributors
 // @description  가벼운 브라우저 만화 번역기 — 로컬 지우기·조판 + 무료 API, 서버 불필요. Lightweight in-browser manga translator.
 // @license      MIT

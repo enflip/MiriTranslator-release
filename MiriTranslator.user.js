@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MiriTranslator
 // @namespace    https://github.com/enflip/MiriTranslator
-// @version      0.5.1
+// @version      0.5.2
 // @author       MiriTranslator contributors
 // @description  가벼운 브라우저 만화 번역기 — 로컬 지우기·조판 + 무료 API, 서버 불필요. Lightweight in-browser manga translator.
 // @license      MIT
@@ -31,160 +31,6 @@
 
 (function() {
 	"use strict";
-	var LANG_TAG = {
-		japanese: "ja",
-		korean: "ko",
-		english: "en",
-		chinese: "zh",
-		spanish: "es",
-		russian: "ru",
-		french: "fr",
-		german: "de",
-		portuguese: "pt",
-		italian: "it",
-		thai: "th",
-		vietnamese: "vi"
-	};
-	async function readGallery() {
-		const w = globalThis.unsafeWindow ?? window;
-		if (w.gallery?.files) return w.gallery;
-		const viaEvent = await new Promise((resolve) => {
-			const evName = `miri-gallery-${Math.random().toString(36).slice(2)}`;
-			const timer = setTimeout(() => resolve(null), 1500);
-			document.addEventListener(evName, (ev) => {
-				clearTimeout(timer);
-				try {
-					resolve(JSON.parse(ev.detail));
-				} catch {
-					resolve(null);
-				}
-			}, { once: true });
-			const s = document.createElement("script");
-			s.textContent = `try{document.dispatchEvent(new CustomEvent(${JSON.stringify(evName)},{detail:JSON.stringify(typeof gallery!=="undefined"?gallery:null)}))}catch(e){document.dispatchEvent(new CustomEvent(${JSON.stringify(evName)},{detail:"null"}))}`;
-			(document.head || document.documentElement).appendChild(s);
-			s.remove();
-		});
-		if (viaEvent?.files) return viaEvent;
-		for (const sc of Array.from(document.scripts)) {
-			if (sc.src || !sc.textContent) continue;
-			const m = /\bgallery\s*=\s*(\{)/.exec(sc.textContent);
-			if (!m) continue;
-			const start = m.index + m[0].length - 1;
-			const json = extractBalanced(sc.textContent, start);
-			if (!json) continue;
-			try {
-				const g = JSON.parse(json);
-				if (g?.files) return g;
-			} catch {}
-		}
-		return null;
-	}
-	function extractBalanced(src, start) {
-		let depth = 0;
-		let inStr = null;
-		for (let i = start; i < src.length; i++) {
-			const ch = src[i];
-			if (inStr) {
-				if (ch === "\\") i++;
-				else if (ch === inStr) inStr = null;
-				continue;
-			}
-			if (ch === "\"" || ch === "'") inStr = ch;
-			else if (ch === "{") depth++;
-			else if (ch === "}") {
-				depth--;
-				if (depth === 0) return src.slice(start, i + 1);
-			}
-		}
-		return null;
-	}
-	function currentPageFromHash(max) {
-		const m = /^#(\d+)$/.exec(location.hash);
-		const n = m ? parseInt(m[1], 10) : 1;
-		return Math.min(Math.max(1, n || 1), Math.max(1, max));
-	}
-	var kHentaiAdapter = {
-		id: "k-hentai",
-		matches: (loc) => /(^|\.)k-hentai\.org$/.test(loc.hostname) && /^\/r\/\d+/.test(loc.pathname),
-		async init() {
-			const g = await readGallery();
-			if (!g?.files?.length) return null;
-			const pages = g.files.map((f, i) => {
-				const rotated = f.image.orientation !== null && f.image.orientation >= 5 && f.image.extension !== "webp";
-				return {
-					index: i + 1,
-					url: f.image.url,
-					width: rotated ? f.image.height : f.image.width,
-					height: rotated ? f.image.width : f.image.height
-				};
-			});
-			const urlToIndex = new Map(pages.map((p) => [p.url, p.index]));
-			const langs = (g.tags ?? []).filter((t) => t.tag?.[0] === "language").map((t) => t.tag[1]);
-			const translated = langs.includes("translated");
-			const langTag = langs.find((l) => LANG_TAG[l]);
-			const sourceLang = langTag ? LANG_TAG[langTag] : null;
-			const navCbs = new Set();
-			let last = currentPageFromHash(pages.length);
-			setInterval(() => {
-				const now = currentPageFromHash(pages.length);
-				if (now !== last) {
-					last = now;
-					navCbs.forEach((cb) => cb(now));
-				}
-			}, 250);
-			window.addEventListener("hashchange", () => {
-				const now = currentPageFromHash(pages.length);
-				if (now !== last) {
-					last = now;
-					navCbs.forEach((cb) => cb(now));
-				}
-			});
-			const imgCbs = new Set();
-			const root = document.getElementById("khReader") ?? document.body;
-			let scheduled = false;
-			new MutationObserver(() => {
-				if (scheduled) return;
-				scheduled = true;
-				requestAnimationFrame(() => {
-					scheduled = false;
-					imgCbs.forEach((cb) => cb());
-				});
-			}).observe(root, {
-				childList: true,
-				subtree: true,
-				attributes: true,
-				attributeFilter: ["src", "data-src"]
-			});
-			return {
-				chapterId: `k-hentai:${g.id}`,
-				pages,
-				sourceLang,
-				alreadyTranslated: translated && sourceLang === "ko",
-				referer: `https://k-hentai.org/r/${g.id}`,
-				uiBottomOffset: 76,
-				currentIndex: () => currentPageFromHash(pages.length),
-				onNavigate(cb) {
-					navCbs.add(cb);
-					return () => navCbs.delete(cb);
-				},
-				imageElements() {
-					const map = new Map();
-					const scope = document.getElementById("khReader") ?? document.body;
-					for (const img of Array.from(scope.querySelectorAll("img"))) {
-						const orig = img.dataset.miriOrig || img.dataset.src || img.getAttribute("src") || "";
-						let idx = urlToIndex.get(orig);
-						if (idx === void 0 && /^\d+$/.test(img.id)) idx = parseInt(img.id, 10);
-						if (idx !== void 0 && pages[idx - 1]) map.set(idx, img);
-					}
-					return map;
-				},
-				onImagesChanged(cb) {
-					imgCbs.add(cb);
-					return () => imgCbs.delete(cb);
-				}
-			};
-		}
-	};
 	var g = globalThis;
 	typeof g.GM_xmlhttpRequest === "function" || typeof g.GM !== "undefined" && g.GM?.xmlHttpRequest, typeof g.GM_getValue === "function" || typeof g.GM !== "undefined" && g.GM?.getValue, g.GM_registerMenuCommand;
 	var transport = null;
@@ -257,9 +103,119 @@
 			return "dev";
 		}
 	}
+	var LANG_TAG = {
+		japanese: "ja",
+		korean: "ko",
+		english: "en",
+		chinese: "zh",
+		spanish: "es",
+		russian: "ru",
+		french: "fr",
+		german: "de",
+		portuguese: "pt",
+		italian: "it",
+		thai: "th",
+		vietnamese: "vi"
+	};
+	async function readGallery() {
+		const w = globalThis.unsafeWindow ?? window;
+		if (w.gallery?.files) return w.gallery;
+		const viaEvent = await new Promise((resolve) => {
+			const evName = `miri-gallery-${Math.random().toString(36).slice(2)}`;
+			const timer = setTimeout(() => resolve(null), 1500);
+			document.addEventListener(evName, (ev) => {
+				clearTimeout(timer);
+				try {
+					resolve(JSON.parse(ev.detail));
+				} catch {
+					resolve(null);
+				}
+			}, { once: true });
+			const s = document.createElement("script");
+			s.textContent = `try{document.dispatchEvent(new CustomEvent(${JSON.stringify(evName)},{detail:JSON.stringify(typeof gallery!=="undefined"?gallery:null)}))}catch(e){document.dispatchEvent(new CustomEvent(${JSON.stringify(evName)},{detail:"null"}))}`;
+			(document.head || document.documentElement).appendChild(s);
+			s.remove();
+		});
+		if (viaEvent?.files) return viaEvent;
+		for (const sc of Array.from(document.scripts)) {
+			if (sc.src || !sc.textContent) continue;
+			const m = /\bgallery\s*=\s*(\{)/.exec(sc.textContent);
+			if (!m) continue;
+			const start = m.index + m[0].length - 1;
+			const json = extractBalanced(sc.textContent, start);
+			if (!json) continue;
+			try {
+				const g = JSON.parse(json);
+				if (g?.files) return g;
+			} catch {}
+		}
+		return null;
+	}
+	function extractBalanced(src, start) {
+		let depth = 0;
+		let inStr = null;
+		for (let i = start; i < src.length; i++) {
+			const ch = src[i];
+			if (inStr) {
+				if (ch === "\\") i++;
+				else if (ch === inStr) inStr = null;
+				continue;
+			}
+			if (ch === "\"" || ch === "'") inStr = ch;
+			else if (ch === "{") depth++;
+			else if (ch === "}") {
+				depth--;
+				if (depth === 0) return src.slice(start, i + 1);
+			}
+		}
+		return null;
+	}
+	function currentPageFromHash(max) {
+		const m = /^#(\d+)$/.exec(location.hash);
+		const n = m ? parseInt(m[1], 10) : 1;
+		return Math.min(Math.max(1, n || 1), Math.max(1, max));
+	}
+	var kHentaiProfile = {
+		id: "k-hentai",
+		matches: (loc) => /(^|\.)k-hentai\.org$/.test(loc.hostname) && /^\/r\/\d+/.test(loc.pathname),
+		async read() {
+			const g = await readGallery();
+			if (!g?.files?.length) return null;
+			const pages = g.files.map((f, i) => {
+				const rotated = f.image.orientation !== null && f.image.orientation >= 5 && f.image.extension !== "webp";
+				return {
+					index: i + 1,
+					url: f.image.url,
+					width: rotated ? f.image.height : f.image.width,
+					height: rotated ? f.image.width : f.image.height
+				};
+			});
+			const langs = (g.tags ?? []).filter((t) => t.tag?.[0] === "language").map((t) => t.tag[1]);
+			const langTag = langs.find((l) => LANG_TAG[l]);
+			const sourceLang = langTag ? LANG_TAG[langTag] : null;
+			const max = pages.length;
+			return {
+				chapterId: `k-hentai:${g.id}`,
+				pages,
+				sourceLang,
+				alreadyTranslated: langs.includes("translated") && sourceLang === "ko",
+				referer: `https://k-hentai.org/r/${g.id}`,
+				uiBottomOffset: 76,
+				currentIndex: () => currentPageFromHash(max),
+				onNavigate(cb) {
+					const on = () => cb(currentPageFromHash(max));
+					window.addEventListener("hashchange", on);
+					return () => window.removeEventListener("hashchange", on);
+				},
+				scope: () => document.getElementById("khReader") ?? document.body,
+				resolve: (img) => /^\d+$/.test(img.id) ? parseInt(img.id, 10) : void 0
+			};
+		}
+	};
 	var MIN_SIDE = 200;
 	var MAX_RATIO = 2.5;
 	var SITES_KEY = "miri.sites.v1";
+	var SITE_PROFILES = [kHentaiProfile];
 	async function isSiteEnabled(host) {
 		const list = await gmGet(SITES_KEY, []);
 		return Array.isArray(list) && list.includes(host);
@@ -342,43 +298,60 @@
 	var genericAdapter = {
 		id: "generic",
 		matches: (loc) => /^https?:$/.test(loc.protocol),
-		isEnabled: () => isSiteEnabled(location.hostname),
+		async gate(loc) {
+			if (SITE_PROFILES.some((p) => p.matches(loc))) return "known";
+			return await isSiteEnabled(loc.hostname) ? "enabled" : "disabled";
+		},
 		async init() {
+			const profile = SITE_PROFILES.find((p) => p.matches(location));
+			const data = profile ? await profile.read().catch(() => null) : null;
 			const urlToIndex = new Map();
 			const pages = [];
-			let indexToEl = new Map();
 			let nextIndex = 1;
+			let indexToEl = new Map();
 			let last = 1;
+			if (data) for (const p of data.pages) {
+				const index = nextIndex++;
+				urlToIndex.set(p.url, index);
+				pages[index - 1] = {
+					...p,
+					index
+				};
+			}
+			const indexOf = (img) => {
+				const viaProfile = data?.resolve?.(img);
+				if (viaProfile !== void 0 && pages[viaProfile - 1]) return viaProfile;
+				const url = imgUrl(img);
+				if (!url) return -1;
+				const known = urlToIndex.get(url);
+				if (known !== void 0) return known;
+				if (data) return -1;
+				const index = nextIndex++;
+				urlToIndex.set(url, index);
+				pages[index - 1] = {
+					index,
+					url
+				};
+				return index;
+			};
 			const scan = () => {
 				const elFor = new Map();
-				let added = false;
-				for (const img of collect()) {
-					if (!isCandidate(img)) continue;
-					const url = imgUrl(img);
-					if (!url) continue;
-					let idx = urlToIndex.get(url);
-					if (idx === void 0) {
-						idx = nextIndex++;
-						urlToIndex.set(url, idx);
-						pages[idx - 1] = {
-							index: idx,
-							url
-						};
-						added = true;
-					}
-					const p = pages[idx - 1];
-					p.url = url;
-					if (img.naturalWidth > 2) {
+				const scope = data?.scope?.() ?? null;
+				for (const img of scope ? Array.from(scope.querySelectorAll("img")) : collect()) {
+					if (!data && !isCandidate(img)) continue;
+					const index = indexOf(img);
+					if (index < 0) continue;
+					const p = pages[index - 1];
+					if (!data && img.naturalWidth > 2) {
 						p.width = img.naturalWidth;
 						p.height = img.naturalHeight;
 					}
-					if (!elFor.has(idx)) elFor.set(idx, img);
+					if (!elFor.has(index)) elFor.set(index, img);
 				}
 				indexToEl = elFor;
-				return added;
 			};
 			scan();
-			const currentPage = () => {
+			const byViewport = () => {
 				const vw = window.innerWidth;
 				const vh = window.innerHeight;
 				let best = 0;
@@ -400,10 +373,11 @@
 				}
 				return best || last || 1;
 			};
+			const currentPage = () => data?.currentIndex ? data.currentIndex() : byViewport();
 			last = currentPage();
 			const navCbs = new Set();
 			const notify = (index) => {
-				if (index === last) return;
+				if (index < 1 || index === last) return;
 				last = index;
 				navCbs.forEach((cb) => cb(index));
 			};
@@ -417,7 +391,8 @@
 			};
 			window.addEventListener("scroll", onViewport, { passive: true });
 			window.addEventListener("resize", onViewport, { passive: true });
-			setInterval(() => notify(currentPage()), 350);
+			setInterval(() => notify(currentPage()), 300);
+			data?.onNavigate?.((i) => notify(i));
 			const imgCbs = new Set();
 			let timer;
 			const refresh = () => {
@@ -439,10 +414,12 @@
 				]
 			});
 			return {
-				chapterId: `generic:${location.host}${location.pathname}`,
+				chapterId: data?.chapterId ?? `generic:${location.host}${location.pathname}`,
 				pages,
-				sourceLang: null,
-				referer: location.href,
+				sourceLang: data?.sourceLang ?? null,
+				alreadyTranslated: data?.alreadyTranslated,
+				referer: data?.referer ?? location.href,
+				uiBottomOffset: data?.uiBottomOffset,
 				currentIndex: () => last,
 				onNavigate(cb) {
 					navCbs.add(cb);
@@ -3618,7 +3595,7 @@ button.b.primary { background: #1f2937; color: #fff; border-color: #1f2937; }
 			return this.showingOriginal;
 		}
 	};
-	var ADAPTERS = [kHentaiAdapter, genericAdapter];
+	var ADAPTER = genericAdapter;
 	function platform() {
 		const ua = navigator.userAgent;
 		if (/Android/i.test(ua)) return "android";
@@ -3626,23 +3603,23 @@ button.b.primary { background: #1f2937; color: #fff; border-color: #1f2937; }
 		return "desktop";
 	}
 	async function main() {
-		const adapter = ADAPTERS.find((a) => a.matches(location));
-		if (!adapter) return;
+		if (!ADAPTER.matches(location)) return;
 		const host = location.hostname;
-		if (adapter.isEnabled && !await adapter.isEnabled(location)) {
+		const gate = await ADAPTER.gate(location);
+		if (gate === "disabled") {
 			gmMenu(`MiriTranslator: 이 사이트(${host}) 번역 켜기`, () => {
 				setSiteEnabled(host, true).then(() => location.reload());
 			});
 			return;
 		}
-		const session = await adapter.init();
+		if (gate === "enabled") gmMenu("MiriTranslator: 이 사이트 번역 끄기", () => {
+			setSiteEnabled(host, false).then(() => location.reload());
+		});
+		const session = await ADAPTER.init();
 		if (!session) {
 			console.warn("[miri] adapter could not read the page");
 			return;
 		}
-		if (adapter.isEnabled) gmMenu("MiriTranslator: 이 사이트 번역 끄기", () => {
-			setSiteEnabled(host, false).then(() => location.reload());
-		});
 		let settings = await loadSettings();
 		const log = (...a) => settings.debug && console.log("[miri]", ...a);
 		const plat = platform();
